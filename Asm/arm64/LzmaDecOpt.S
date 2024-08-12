@@ -10,6 +10,76 @@
 ; LzmaDec_DecodeReal_*() must be equal in both versions (C / ASM).
 */
 
+/*
+ ; Support macros for
+ ;   - Armv8.3-A Pointer Authentication and
+ ;   - Armv8.5-A Branch Target Identification
+ ; Further documentation can be found at:
+ ;  - https://developer.arm.com/documentation/101028/0012/5--Feature-test-macros
+ ; Note that the hint instrunctions are used which means that on older assemblers they will assemble
+ ;  and that they are in the NOP space on older architectures and are NOP'd.
+ */
+#if defined(__ARM_FEATURE_BTI_DEFAULT) && __ARM_FEATURE_BTI_DEFAULT == 1
+  /* BTI is enabled */
+  #define BTI_J hint #36
+#else
+  /* BTI is NOT enabled */
+  #define BTI_J
+#endif
+
+#if defined(__ARM_FEATURE_PAC_DEFAULT)
+  /* PAC is enabled */
+  /* Which key is being used for PAC signatures, either A or B key */
+  #if __ARM_FEATURE_PAC_DEFAULT & 1
+    /* Sign with the A Key */
+    #define SIGN_LR   hint #25
+    #define VERIFY_LR hint #29
+  #elif __ARM_FEATURE_PAC_DEFAULT & 2
+    /* Sign with the B key */
+    #define SIGN_LR   hint #27
+    #define VERIFY_LR hint #31
+  #else
+    #error "Unknown PAC key"
+  #endif
+#else
+/* PAC is not enabled */
+  #define VERIFY_LR
+
+  #if defined(__ARM_FEATURE_BTI_DEFAULT) && __ARM_FEATURE_BTI_DEFAULT == 1
+    /* However, BTI is enabled, we let the SIGN_LR be a valid call target as it's fist instruction */
+    #define BTI_C hint #34
+    #define SIGN_LR BTI_C
+  #else
+    #define SIGN_LR
+  #endif
+#endif
+
+/* Add the notes section to ELF only */
+#if defined(__ELF__)
+  /* Define the property values for GNU notes section in ELF */
+  #if defined(__ARM_FEATURE_BTI_DEFAULT) && __ARM_FEATURE_BTI_DEFAULT == 1
+    #define GNU_PROPERTY_AARCH64_BTI 0x1
+  #else
+    #define GNU_PROPERTY_AARCH64_BTI 0
+  #endif
+  #if defined(__ARM_FEATURE_PAC_DEFAULT)
+    #define GNU_PROPERTY_AARCH64_POINTER_AUTH 0x2
+  #else
+    #define GNU_PROPERTY_AARCH64_POINTER_AUTH 0
+  #endif
+
+  .pushsection .note.gnu.property, "a";
+  .balign 8;
+  .long 4;
+  .long 0x10;
+  .long 0x5;
+  .asciz "GNU";
+  .long 0xc0000000; /* GNU_PROPERTY_AARCH64_FEATURE_1_AND */
+  .long 4;
+  .long(GNU_PROPERTY_AARCH64_POINTER_AUTH | GNU_PROPERTY_AARCH64_BTI);
+  .long 0;
+  .popsection;
+#endif
 
 #include "7zAsm.S"
 
@@ -213,6 +283,7 @@
         jnz     1f
         NORM_2
 1:
+        BTI_J
 .endm
 
 
@@ -738,7 +809,7 @@ _LzmaDec_DecodeReal_3:
 .LFB0:
 	.cfi_startproc  
 */
-
+	SIGN_LR
 	stp	x19, x20, [sp, -128]!
 	stp	x21, x22, [sp, 16]
 	stp	x23, x24, [sp, 32]
@@ -791,6 +862,7 @@ _LzmaDec_DecodeReal_3:
         cmovne  t0_R, dicPos
         ldrb    sym, [t0_R, -1]
 1:
+        BTI_J
         IsMatchBranch_Pre
         cmp     state, 4 * PMULT
         jb      lit_end
@@ -807,8 +879,10 @@ _LzmaDec_DecodeReal_3:
 # ---------- LITERAL ----------
 MY_ALIGN_64
 lit_start:
+        BTI_J
         mov     state, wzr
 lit_start_2:
+        BTI_J
         LIT_PROBS
 
     #ifdef _LZMA_SIZE_OPT
@@ -818,6 +892,7 @@ lit_start_2:
         BIT_01        
 MY_ALIGN_FOR_LOOP
 lit_loop:
+        BTI_J
         BIT_1
         tbz     sym, 7, lit_loop
         
@@ -840,6 +915,7 @@ lit_loop:
                 
         CheckLimits_lit
 lit_end:
+        BTI_J
         IF_BIT_0_NOUP probs_state, pbPos_R, (IsMatch - IsMatch), lit_start
 
         # jmp     IsMatch_label
@@ -850,6 +926,7 @@ lit_end:
 # ---------- MATCHES ----------
 # MY_ALIGN_FOR_ENTRY
 IsMatch_label:
+        BTI_J
         UPDATE_1 probs_state, pbPos_R, (IsMatch - IsMatch)
         IF_BIT_1 probs_state, 0, (IsRep - IsMatch), IsRep_label
 
@@ -858,6 +935,7 @@ IsMatch_label:
 
 # ---------- LEN DECODE ----------
 len_decode:
+        BTI_J
         mov     len, 8 - kMatchMinLen
         IF_BIT_0_NOUP_1 probs, len_mid_0
         UPDATE_1 probs, 0, 0
@@ -880,6 +958,7 @@ len_decode:
         BIT_01
 MY_ALIGN_FOR_LOOP
 len8_loop:
+        BTI_J
         BIT_1
         tbz     sym, 6, len8_loop
    #endif        
@@ -889,10 +968,12 @@ len8_loop:
         
 MY_ALIGN_FOR_ENTRY
 len_mid_0:
+        BTI_J
         UPDATE_0 probs, 0, 0
         p2_add  probs, pbPos_R
         BIT_0
 len_mid_2:
+        BTI_J
         BIT_1
         BIT_2
         sub     len, sym, len
@@ -914,6 +995,7 @@ len_mid_2:
         BIT_01
 MY_ALIGN_FOR_LOOP
 slot_loop:
+        BTI_J
         BIT_1
         tbz     sym, 5, slot_loop
         
@@ -964,8 +1046,10 @@ slot_loop:
         jmp     direct_norm
 MY_ALIGN_FOR_ENTRY
 direct_loop:
+        BTI_J
         DIRECT_1
 direct_norm:
+        BTI_J
         TEST_HIGH_BYTE_range
         jnz     direct_loop
         NORM_2
@@ -989,6 +1073,7 @@ direct_norm:
         DIRECT_2
         
 direct_unroll:
+        BTI_J
         NORM_2
         DIRECT_1
         DIRECT_1
@@ -1004,6 +1089,7 @@ direct_unroll:
 
 MY_ALIGN_FOR_ENTRY
 direct_end:
+        BTI_J
         shl     sym, kNumAlignBits
         REV_0   prob_reg
         REV_1   prob_reg, 2
@@ -1011,7 +1097,7 @@ direct_end:
         REV_2   prob_reg, 8
 
 decode_dist_end:
-
+        BTI_J
     // if (distance >= (checkDicSize == 0 ? processedPos: checkDicSize))
 
         tst     checkDicSize, checkDicSize
@@ -1037,7 +1123,7 @@ decode_dist_end:
         
 # ---------- COPY MATCH ----------
 copy_match:
-
+        BTI_J
     // if ((rem = limit - dicPos) == 0) break // return SZ_ERROR_DATA;
         subs    cnt_R, limit, dicPos
         // jz      fin_dicPos_LIMIT
@@ -1060,6 +1146,7 @@ copy_match:
         p2_add  t0_R, dicBufSize
         ja      copy_match_cross
 1:
+        BTI_J
 # ---------- COPY MATCH FAST ----------
     # t0_R : src_pos
         p2_add  t0_R, dic
@@ -1068,6 +1155,7 @@ copy_match:
         p1_neg  cnt_R
 
 copy_common:
+        BTI_J
         dec     dicPos
 
     # dicPos  : (ptr_to_last_dest_BYTE)    
@@ -1092,6 +1180,7 @@ copy_common:
         jz      2f
 MY_ALIGN_FOR_LOOP
 1:
+        BTI_J
         /*
         strh    sym, [dicPos, cnt_R]
         ldrh    sym, [t0_R, cnt_R]
@@ -1104,6 +1193,7 @@ MY_ALIGN_FOR_LOOP
         adds    cnt_R, cnt_R, 2
         jnz     1b
 2:
+        BTI_J
         
         /*
         // for universal little/big endian code, but slow
@@ -1126,6 +1216,7 @@ MY_ALIGN_FOR_LOOP
 
 MY_ALIGN_FOR_LOOP
 1:
+        BTI_J
         strb    sym, [dicPos, cnt_R]
         ldrb    sym, [t0_R, cnt_R]
         inc_s   cnt_R
@@ -1139,11 +1230,13 @@ MY_ALIGN_FOR_LOOP
 
 copy_end:
 lz_end_match:
+        BTI_J
         strb    sym, [dicPos], 1
   
         # IsMatchBranch_Pre
         CheckLimits
 lz_end:
+        BTI_J
         IF_BIT_1_NOUP probs_state, pbPos_R, (IsMatch - IsMatch), IsMatch_label
 
 
@@ -1164,6 +1257,7 @@ lz_end:
         jae     1f
         p2_add  t0_R, dicBufSize
 1:
+    BTI_J
     #endif                        
 
         ldrb    match, [dic, t0_R]
@@ -1184,6 +1278,7 @@ lz_end:
 
 MY_ALIGN_FOR_LOOP
 litm_loop:
+        BTI_J
         LITM
         tbz     sym, 8, litm_loop
         
@@ -1207,6 +1302,7 @@ litm_loop:
         // mov     len, wzr // LITM uses same regisetr (len / offs). So we clear it
         CheckLimits_lit
 lit_matched_end:
+        BTI_J
         IF_BIT_1_NOUP probs_state, pbPos_R, (IsMatch - IsMatch), IsMatch_label
         # IsMatchBranch
         p2_sub  state, 3 * PMULT
@@ -1217,6 +1313,7 @@ lit_matched_end:
 # ---------- REP 0 LITERAL ----------
 MY_ALIGN_FOR_ENTRY
 IsRep0Short_label:
+        BTI_J
         UPDATE_0 probs_state, pbPos_R, 0
 
     // dic[dicPos] = dic[dicPos - rep0 + (dicPos < rep0 ? dicBufSize : 0)];
@@ -1243,6 +1340,7 @@ IsRep0Short_label:
         jae     1f
         p2_add  t0_R, dicBufSize
 1:
+    BTI_J
     #endif
         
         ldrb    sym, [dic, t0_R]
@@ -1251,6 +1349,7 @@ IsRep0Short_label:
         
 MY_ALIGN_FOR_ENTRY
 IsRep_label:
+        BTI_J
         UPDATE_1 probs_state, 0, (IsRep - IsMatch)
 
         # The (checkDicSize == 0 && processedPos == 0) case was checked before in LzmaDec.c with kBadRepCode.
@@ -1276,6 +1375,7 @@ IsRep_label:
 
 MY_ALIGN_FOR_ENTRY
 IsRepG0_label:
+        BTI_J
         UPDATE_1 probs_state, 0, (IsRepG0 - IsMatch)
         IF_BIT_1 probs_state, 0, (IsRepG1 - IsMatch), IsRepG1_label
         mov     dist, rep1
@@ -1285,6 +1385,7 @@ IsRepG0_label:
         
 # MY_ALIGN_FOR_ENTRY
 IsRepG1_label:
+        BTI_J
         UPDATE_1 probs_state, 0, (IsRepG1 - IsMatch)
         IF_BIT_1 probs_state, 0, (IsRepG2 - IsMatch), IsRepG2_label
         mov     dist, rep2
@@ -1295,6 +1396,7 @@ IsRepG1_label:
 
 # MY_ALIGN_FOR_ENTRY
 IsRepG2_label:
+        BTI_J
         UPDATE_1 probs_state, 0, (IsRepG2 - IsMatch)
         mov     dist, rep3
         mov     rep3, rep2
@@ -1309,6 +1411,7 @@ IsRepG2_label:
 
 MY_ALIGN_FOR_ENTRY
 short_dist:
+        BTI_J
         p2_sub_s numBits, 32 + 1
         jbe     decode_dist_end
         or      sym, 2
@@ -1318,6 +1421,7 @@ short_dist:
         mov     sym2, PMULT // # step
 MY_ALIGN_FOR_LOOP
 spec_loop:
+        BTI_J
         REV_1_VAR prob_reg
         dec_s   numBits
         jnz     spec_loop
@@ -1336,6 +1440,7 @@ spec_loop:
 # ---------- COPY MATCH 0 ----------
 MY_ALIGN_FOR_ENTRY
 copy_match_0:
+    BTI_J
     #ifdef LZMA_USE_4BYTES_FILL
         strb    sym, [dicPos, cnt_R]
         inc_s   cnt_R
@@ -1354,6 +1459,7 @@ copy_match_0:
         orr     t3, t3, t3, lsl 16
 MY_ALIGN_FOR_LOOP_16
 1:
+        BTI_J
         /*
         str     t3, [dicPos, cnt_R]
         adds    cnt_R, cnt_R, 4
@@ -1364,11 +1470,13 @@ MY_ALIGN_FOR_LOOP_16
         adds    cnt_R, cnt_R, 4
         jnz     1b
 2:
+        BTI_J
         // p2_and  sym, 255
     #else
 
 MY_ALIGN_FOR_LOOP
 1:
+        BTI_J
         strb    sym, [dicPos, cnt_R]
         inc_s   cnt_R
         jz      copy_end
@@ -1385,9 +1493,11 @@ MY_ALIGN_FOR_LOOP
 copy_match_cross:
         # t0_R  - src pos
         # cnt_R - total copy len
+        BTI_J
 
         p1_neg  cnt_R
 1:
+        BTI_J
         ldrb    sym, [dic, t0_R]
         inc     t0_R
         strb    sym, [dicPos, cnt_R]
@@ -1417,6 +1527,7 @@ fin_dicPos_LIMIT:
 */
 
 fin_ERROR_MATCH_DIST:
+        BTI_J
         # rep0 = distance + 1;
         p2_add  len, kMatchSpecLen_Error_Data
         mov     rep3, rep2
@@ -1429,6 +1540,7 @@ fin_ERROR_MATCH_DIST:
         jmp     fin
 
 end_of_payload:
+        BTI_J
         inc_s   sym
         jnz     fin_ERROR_MATCH_DIST
 
@@ -1442,9 +1554,11 @@ fin_OK_lit:
 */
 
 fin_OK:
+        BTI_J
         mov     sym, wzr
 
 fin:
+        BTI_J
         NORM
 
     #define fin_lzma_reg  t0_R
@@ -1476,7 +1590,7 @@ fin:
         ldp	x23, x24, [sp, 32]
 	ldp	x21, x22, [sp, 16]
 	ldp	x19, x20, [sp], 128
-
+	VERIFY_LR
         ret
 /*
 	.cfi_endproc
